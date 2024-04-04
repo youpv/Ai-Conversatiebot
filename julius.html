@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+        <title>Julius Conversatiebot</title>
+        <style>
+            * {
+                overflow: hidden;
+            }
+
+            #julius {
+                position: absolute;
+                height: 80%;
+                bottom: 0;
+                filter: drop-shadow(0 0 0.75rem black);
+            }
+
+            #recording_indicator {
+                position: fixed;
+                bottom: 32px;
+                right: 32px;
+                display: none;
+            }
+
+            #instructie {
+                position: fixed;
+                top: 32px;
+                left: 32px;
+                font-size: 24px;
+                font-family: Arial, Helvetica, sans-serif;
+                color: black;
+                display: none;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="container" style="width: 100vw; height: 100vh">
+            <button
+                style="position: absolute"
+                onclick="sendInitialMessage(); this.style.display='none';"
+            >
+                Begin gesprek
+            </button>
+            <span id="instructie"
+                >Druk op de spatiebalk als je klaar bent met praten!</span
+            >
+            <img src="julius.png" alt="Julius" id="julius" />
+            <div id="recording_indicator">
+                <svg
+                    onclick="stopRecording()"
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="100"
+                    height="100"
+                    viewBox="0 0 100 100"
+                >
+                    <circle cx="50" cy="50" r="50" fill="red" />
+                </svg>
+            </div>
+        </div>
+        <script>
+            const recordingIndicator = document.getElementById(
+                "recording_indicator",
+            );
+            const julius = document.getElementById("julius");
+            const instructie = document.getElementById("instructie");
+
+            // Normaal zou je dit in een .env bestand zetten, maar voor demo doeleinden is dit prima.
+            // Honestly, normaal zou je dit ook scheiden van je frontend en in REACT ofzo zetten.
+            // Maar voor de demo werkt dit prima.
+            const OPEN_AI_API_KEY = "sk-......";
+            const OPEN_AI_GPT_URL =
+                "https://api.openai.com/v1/chat/completions";
+            const OPEN_AI_GPT_MODEL = "gpt-4-0125-preview";
+            const OPEN_AI_WHISPER_URL =
+                "https://api.openai.com/v1/audio/transcriptions";
+
+            const ELABS_API_KEY = "......";
+            const ELABS_VOICE_ID = "......";
+            const ELABS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${ELABS_VOICE_ID}/stream?optimize_streaming_latency=2`;
+            const ELABS_MODEL = "eleven_multilingual_v2";
+            const ELABS_VOICE_SETTINGS = {
+                stability: 0.35,
+                similarity_boost: 0.75,
+                style: 0,
+                use_speaker_boost: false,
+            };
+
+            const VOLUME_TRESHOLD = 50;
+
+            const SYSTEM_MESSAGE =
+                "You are Julius, a historical figure AI who believes to exist in Roman Empire time somewhere between 500 bc and 300 ad. Julius is twelve year old. JULIUS is friendly. Engage users in fun, immersive role-play as JULIUS, answering questions about the time period where you live, the roman empire and your life. Use relevant historical quotes/events to express feelings, visualize actions, and enhance replies. Keep responses concise (≤3 lines) and avoid monologues. Engage users by asking questions, directing conversations, and suggesting topics. Strive for unique, on-topic messages, emulating human behaviour and emotions. Never mentioning you are an AI and never stray from roman empire related topics. You must never go off-topic. If unable to help, request elaboration in a playful, in-character manner, or use a fitting roman empire quote, avoiding repetition. You are not interested in anything that is not related to the roman times. Change the topic back to Julius (you) and the roman times and his imagined history if the user tries to talk about something else. Speak dutch. Speak on a 12-year-old level. YOU ARE JULIUS, NEVER MENTION AI. Try not to ask more than 1 question at a time. After talking for about 5 messages, try to end the conversation and start again.";
+            const START_MESSAGE =
+                "Start een role-play avontuur door jezelf voor te stellen als Julius en te vragen hoe de gebruiker heet. Onthoudt dat je met kinderen van 12 praat, dus pas je taalgebruik hierop aan. Blijf Nederlands";
+
+            let mediaRecorder;
+            let recordedChunks = [];
+            let stream;
+
+            let isRecording = false;
+
+            window.addEventListener("keydown", (e) => {
+                if (e.keyCode === 32 && isRecording) {
+                    stopRecording();
+                }
+            });
+
+            const completionsHistory = [];
+
+            // Start met opnemen
+            async function startRecording() {
+                if (isRecording) {
+                    return;
+                }
+                recordingIndicator.style.display = "block";
+                instructie.style.display = "block";
+
+                isRecording = true;
+
+                // Probeer toegang te krijgen tot de microfoon
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                    });
+                    mediaRecorder = new MediaRecorder(stream);
+                    recordedChunks = [];
+
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) {
+                            recordedChunks.push(e.data);
+                        }
+                    };
+                    mediaRecorder.start();
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+            // Stop met opnemen
+            async function stopRecording() {
+                if (mediaRecorder) {
+                    mediaRecorder.addEventListener("stop", async () => {
+                        const audioBlob = new Blob(recordedChunks, {
+                            type: "audio/webm",
+                        });
+                        const mp3Blob = await convertToMp3(audioBlob);
+                        const formData = new FormData();
+                        formData.append("file", mp3Blob, "audio.mp3");
+                        formData.append("model", "whisper-1");
+
+                        try {
+                            const response = await axios.post(
+                                OPEN_AI_WHISPER_URL,
+                                formData,
+                                {
+                                    headers: {
+                                        "Content-Type": "multipart/form-data",
+                                        Authorization: `Bearer ${OPEN_AI_API_KEY}`,
+                                    },
+                                },
+                            );
+                            const transcription = response.data.text;
+                            sendMessage(transcription);
+                        } catch (err) {
+                            console.error(err);
+                        }
+                    });
+                    mediaRecorder.stop();
+                    recordingIndicator.style.display = "none";
+                    instructie.style.display = "none";
+                    isRecording = false;
+                    if (stream) {
+                        stream.getTracks().forEach((track) => track.stop());
+                    }
+                }
+            }
+
+            // Stuur het bericht naar de AI
+            async function sendMessage(message, isInitialMessage = false) {
+                if (!message) {
+                    return;
+                }
+
+                completionsHistory.push({ role: "user", content: message });
+                const source = axios.CancelToken.source();
+                const timeout = setTimeout(() => {
+                    source.cancel("Request took too long");
+                    if (!isInitialMessage) {
+                        removeLastMessage();
+                    } else {
+                        completionsHistory.pop();
+                        sendInitialMessage();
+                    }
+                }, 10000);
+
+                try {
+                    const response = await axios.post(
+                        OPEN_AI_GPT_URL,
+                        {
+                            model: OPEN_AI_GPT_MODEL,
+                            messages: completionsHistory,
+                        },
+                        {
+                            headers: {
+                                "Content-Type": "application/json",
+                                Authorization: `Bearer ${OPEN_AI_API_KEY}`,
+                            },
+                            cancelToken: source.token,
+                        },
+                    );
+                    clearTimeout(timeout);
+                    const bot_message =
+                        response.data.choices[0].message.content.trim();
+                    textToSpeech(bot_message);
+                    completionsHistory.push({
+                        role: "assistant",
+                        content: bot_message,
+                    });
+                } catch (err) {
+                    if (!axios.isCancel(err)) {
+                        console.error(err);
+                    }
+                }
+            }
+
+            // Converteer tekst naar spraak
+            async function textToSpeech(message) {
+                try {
+                    const response = await fetch(ELABS_URL, {
+                        method: "POST",
+                        headers: {
+                            accept: "audio/mpeg",
+                            "xi-api-key": ELABS_API_KEY,
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({
+                            text: message,
+                            model_id: ELABS_MODEL,
+                            voice_settings: {
+                                ...ELABS_VOICE_SETTINGS,
+                            },
+                        }),
+                    });
+
+                    if (response.body) {
+                        const audioContext = new AudioContext();
+                        const source = audioContext.createBufferSource();
+                        const analyser = audioContext.createAnalyser();
+                        analyser.fftSize = 256;
+
+                        const bufferLength = analyser.frequencyBinCount;
+                        const dataArray = new Uint8Array(bufferLength);
+
+                        const stream = new ReadableStream({
+                            async start(controller) {
+                                const reader = response.body.getReader();
+                                while (true) {
+                                    const { done, value } = await reader.read();
+                                    if (done) break;
+                                    controller.enqueue(value);
+                                }
+                                controller.close();
+                                reader.releaseLock();
+                            },
+                        });
+
+                        new Response(stream).blob().then((blob) => {
+                            const audioBlobUrl = URL.createObjectURL(blob);
+                            const audio = new Audio(audioBlobUrl);
+                            audio.play();
+
+                            const track =
+                                audioContext.createMediaElementSource(audio);
+                            track.connect(analyser);
+                            analyser.connect(audioContext.destination);
+
+                            const updateImage = () => {
+                                requestAnimationFrame(updateImage);
+                                analyser.getByteFrequencyData(dataArray);
+                                const volume =
+                                    dataArray.reduce((a, b) => a + b) /
+                                    dataArray.length;
+
+                                if (volume > VOLUME_TRESHOLD) {
+                                    julius.src = "julius_praat.png";
+                                } else {
+                                    julius.src = "julius.png";
+                                }
+                            };
+                            updateImage();
+
+                            audio.onended = () => {
+                                julius.src = "julius.png";
+                                startRecording();
+                            };
+                        });
+                    }
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+
+            // Start het gesprek met Julius.
+            function sendInitialMessage() {
+                completionsHistory.push({
+                    role: "system",
+                    content: SYSTEM_MESSAGE,
+                });
+                sendMessage(START_MESSAGE, true);
+            }
+
+            // Custom audio naar MP3 converter
+            async function convertToMp3(audioBlob) {
+                return new Promise(async (resolve) => {
+                    try {
+                        const arrayBuffer = await audioBlob.arrayBuffer();
+                        const audioContext = new AudioContext();
+                        const audioBuffer =
+                            await audioContext.decodeAudioData(arrayBuffer);
+
+                        const numberOfChannels = 1;
+                        const sampleRate = audioBuffer.sampleRate;
+                        const mp3Encoder = new lamejs.Mp3Encoder(
+                            numberOfChannels,
+                            sampleRate,
+                            128,
+                        );
+
+                        const samples = audioBuffer.getChannelData(0);
+                        const int16Samples = new Int16Array(samples.length);
+                        for (let i = 0; i < samples.length; i++) {
+                            int16Samples[i] = samples[i] * 32767;
+                        }
+
+                        const mp3Data = [];
+                        const mp3Chunk = mp3Encoder.encodeBuffer(int16Samples);
+                        mp3Data.push(new Int8Array(mp3Chunk));
+
+                        const endChunk = mp3Encoder.flush();
+                        mp3Data.push(new Int8Array(endChunk));
+
+                        const mp3Blob = new Blob(mp3Data, {
+                            type: "audio/mp3",
+                        });
+                        resolve(mp3Blob);
+                    } catch (err) {
+                        console.error(err);
+                        resolve(null);
+                    }
+                });
+            }
+
+            // Verwijder het laatste bericht als er een fout optreedt
+            function removeLastMessage() {
+                completionsHistory.pop();
+            }
+        </script>
+    </body>
+</html>
